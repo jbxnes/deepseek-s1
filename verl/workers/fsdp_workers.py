@@ -112,6 +112,7 @@ class ActorRolloutRefWorker(Worker):
                                model_path,
                                fsdp_config,
                                optim_config,
+                               peft_config,
                                override_model_config,
                                use_remove_padding=False,
                                enable_gradient_checkpointing=False,
@@ -119,6 +120,7 @@ class ActorRolloutRefWorker(Worker):
         from verl.utils.model import print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
         from transformers import AutoModelForCausalLM, AutoConfig
+        from peft import LoraConfig, get_peft_model
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision
         from torch import optim
 
@@ -166,6 +168,19 @@ class ActorRolloutRefWorker(Worker):
                                                                 config=actor_model_config,
                                                                 attn_implementation='flash_attention_2',
                                                                 trust_remote_code=trust_remote_code)
+            
+            if peft_config is not None:
+                lora_config = LoraConfig(
+                    r=peft_config.r,
+                    lora_alpha=peft_config.lora_alpha,
+                    target_modules=peft_config.target_modules,
+                    lora_dropout=peft_config.lora_dropout,
+                    bias=peft_config.bias,
+                    task_type="CAUSAL_LM"
+                )
+                
+                actor_module = get_peft_model(actor_module, lora_config)
+                actor_module.print_trainable_parameters()
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
@@ -207,12 +222,17 @@ class ActorRolloutRefWorker(Worker):
             sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
         else:
             sharding_strategy = ShardingStrategy.FULL_SHARD
+            
+        if peft_config is not None:
+            use_orig_params=True
+        else:
+            use_orig_params=False
 
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(
             actor_module,
             param_init_fn=init_fn,
-            use_orig_params=False,
+            use_orig_params=use_orig_params,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
@@ -297,13 +317,20 @@ class ActorRolloutRefWorker(Worker):
             if self._is_actor:
                 optim_config = self.config.actor.optim
                 fsdp_config = self.config.actor.fsdp_config
+                
+                if self.config.actor.use_peft:
+                    peft_config = self.config.actor.peft
+                else:
+                    peft_config = None 
             else:
                 optim_config = None
                 fsdp_config = OmegaConf.create()
+                peft_config = None 
             self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
                 model_path=self.config.model.path,
                 fsdp_config=fsdp_config,
                 optim_config=optim_config,
+                peft_config=peft_config,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
                 enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
@@ -335,6 +362,7 @@ class ActorRolloutRefWorker(Worker):
             self.ref_module_fsdp = self._build_model_optimizer(model_path=self.config.model.path,
                                                                fsdp_config=self.config.ref.fsdp_config,
                                                                optim_config=None,
+                                                               peft_config=None,
                                                                override_model_config=override_model_config,
                                                                use_remove_padding=use_remove_padding,
                                                                trust_remote_code=self.config.model.get(
