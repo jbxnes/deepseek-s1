@@ -555,6 +555,7 @@ class RayPPOTrainer(object):
 
         logger = Tracking(project_name=self.config.trainer.project_name,
                           experiment_name=self.config.trainer.experiment_name,
+                          team_name=self.config.trainer.team_name,
                           default_backend=self.config.trainer.logger,
                           config=OmegaConf.to_container(self.config, resolve=True))
 
