@@ -68,6 +68,7 @@ class HFRollout(BaseRollout):
         response_length = prompts.meta_info.get('response_length', self.config.response_length)
         top_p = prompts.meta_info.get('top_p', self.config.get('top_p', 1.0))
         top_k = prompts.meta_info.get('top_k', self.config.get('top_k', 0))
+        num_return_sequences = self.config.n if do_sample else 1
 
         if top_k is None:
             top_k = 0
@@ -91,12 +92,19 @@ class HFRollout(BaseRollout):
                     eos_token_id=eos_token_id,
                     pad_token_id=pad_token_id,
                     generation_config=generation_config,
+                    num_return_sequences=num_return_sequences,
                     # renormalize_logits=True,
                     output_scores=False,  # this is potentially very large
                     return_dict_in_generate=True,
                     use_cache=True)
         # TODO: filter out the seq with no answers like ds-chat
         seq = output.sequences
+        
+        # repeat attention_mask and position_ids so batch dimensions match
+        if num_return_sequences > 1:
+            attention_mask = attention_mask.repeat_interleave(repeats=num_return_sequences, dim=0) # (b * n, prompt_length)
+            position_ids = position_ids.repeat_interleave(repeats=num_return_sequences, dim=0) # (b * n, prompt_length)
+            batch_size = batch_size * num_return_sequences
 
         # huggingface generate will stop generating when all the batch reaches [EOS].
         # We have to pad to response_length
