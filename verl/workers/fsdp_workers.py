@@ -278,7 +278,7 @@ class ActorRolloutRefWorker(Worker):
         if self.config.rollout.name == 'hf':
             from verl.workers.rollout import HFRollout
             from verl.workers.sharding_manager import BaseShardingManager
-            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
+            rollout = HFRollout(module=self.actor_module_fsdp, tokenizer=self.tokenizer, config=self.config.rollout)
             rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
         elif self.config.rollout.name == 'vllm':

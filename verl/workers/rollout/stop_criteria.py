@@ -3,6 +3,54 @@ import itertools
 
 from transformers import StoppingCriteria, PreTrainedTokenizerBase
 
+
+def get_matching_eos_mask(input_ids: torch.LongTensor, eos: int) -> torch.BoolTensor:
+    last_token = input_ids[:, -1]
+    matching_idx = last_token == int # matching_idx_shape: (B,)
+    return matching_idx
+
+
+class AnyEosStoppingCriteria(StoppingCriteria):
+    """
+    This class stops generation for all sequences when any sequence in the batch outputs an EOS token.
+    
+    Args:
+        eos_token_id (int or List[int]): The token ID(s) to be considered as EOS tokens.
+    """
+    
+    def __init__(self, eos_token_id):
+        self.eos_token_id = eos_token_id if isinstance(eos_token_id, list) else [eos_token_id]
+    
+    # @add_start_docstrings(STOPPING_CRITERIA_INPUTS_DOCSTRING)
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
+        """
+        Check if any sequence in the batch has generated an EOS token in its last position.
+        If any has, return True for all sequences to stop generation for the entire batch.
+        
+        Args:
+            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary.
+            scores (`torch.FloatTensor` of shape `(batch_size, config.vocab_size)`):
+                Prediction scores of a language modeling head. These can be scores for each vocabulary token 
+                before SoftMax or scores for each vocabulary token after SoftMax.
+                
+        Returns:
+            `torch.BoolTensor` of shape `(batch_size,)`: A tensor of booleans indicating whether to stop 
+            generation for each sequence in the batch. Here, either all values are True or all are False.
+        """
+        # Check only the most recently generated token (last position) for each sequence
+        last_token = input_ids[:, -1]
+        
+        # Check if any sequence has an EOS token in the last position
+        any_eos = any([(last_token == eos).any() for eos in self.eos_token_id])
+        
+        # If any sequence has an EOS token, return True for all sequences
+        if any_eos:
+            return torch.ones_like(input_ids[:, 0], dtype=torch.bool)
+        else:
+            return torch.zeros_like(input_ids[:, 0], dtype=torch.bool)
+
+
 def get_matching_seq_mask(input_ids: torch.LongTensor, pattern: torch.LongTensor) -> torch.BoolTensor:
     # 1. Get the last three tokens of each sequence
     last_three = input_ids[:, -3:]
