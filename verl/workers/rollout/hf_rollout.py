@@ -57,6 +57,9 @@ def budget_forcing_gen(
     
     Return the end result of generation along with the initial prompt.
     """
+    assert max_budget - min_budget > 128
+    max_budget_cut = max_budget - 128
+    
     input_idx = input_ids
     attention_mask = input_attention_masks
     device = input_ids.device
@@ -74,7 +77,7 @@ def budget_forcing_gen(
         input_ids=input_idx,
         attention_mask=attention_mask,
         do_sample=True,
-        max_new_tokens=max_budget,
+        max_new_tokens=max_budget_cut,
         eos_token_id=eos_token_id,
         pad_token_id=pad_token_id, # This should be 151643 <end_of_text> for Qwen
         generation_config=generation_config,
@@ -100,7 +103,7 @@ def budget_forcing_gen(
             input_ids=input_idx,
             attention_mask=new_input_attention_masks,
             do_sample=True,
-            max_new_tokens=max_budget-current_used_budget,
+            max_new_tokens=max_budget_cut-current_used_budget,
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
             generation_config=generation_config,
@@ -119,7 +122,7 @@ def budget_forcing_gen(
         input_ids=output_seqs,
         attention_mask=new_input_attention_masks,
         do_sample=True,
-        max_new_tokens=max(max_budget-current_used_budget, 256),
+        max_new_tokens=max_budget-current_used_budget,
         eos_token_id=eos_token_id,
         pad_token_id=pad_token_id,
         generation_config=generation_config,
@@ -193,7 +196,8 @@ class HFRollout(BaseRollout):
             param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
         with param_ctx:
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                if (not validate) and self.config.budget_forcing:
+                # Only do budget forcing during training and if do_budget_forcing is set to True in rollout config.
+                if (not validate) and self.config.do_budget_forcing:
                     budget_forcing_gen(
                         model=self.module,
                         tokenizer=self.tokenizer,
