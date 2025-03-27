@@ -26,6 +26,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from verl import DataProto
 from verl.utils.torch_functional import get_eos_mask
 from .base import BaseRollout
+from .stop_criteria import MatchingTokensStoppingCriteria
 
 from transformers import GenerationConfig
 
