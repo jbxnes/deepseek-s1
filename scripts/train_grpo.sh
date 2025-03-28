@@ -10,7 +10,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=128 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=4 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -20,6 +20,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_peft=$USE_PEFT \
     actor_rollout_ref.rollout.name=hf \
     actor_rollout_ref.rollout.top_k=0 \
+    actor_rollout_ref.rollout.do_budget_forcing=$DO_BUDGET_FORCING \
+    actor_rollout_ref.rollout.min_budget=512 \
+    actor_rollout_ref.rollout.max_budget=1024 \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=8 \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False \

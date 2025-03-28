@@ -88,6 +88,7 @@ def budget_forcing_gen(
     # 2. generate until every sequence has produced at least min_budget number of new tokens.
     # Stop whenever any sequence produces "</think>" and EOS, and do the appropriate replacement.
     current_used_budget = output_seqs.shape[1] - init_prompt_len
+    print(f"Start budget forcing generation. Currently used {current_used_budget} tokens from budget.")
     while current_used_budget < min_budget:
         matching_seq_mask = get_matching_seq_mask(output_seqs, matching_seq_stop_criteria.think_token_combo)
         matching_eos_mask = get_matching_eos_mask(output_seqs, tokenizer.eos_token_id)
@@ -207,7 +208,7 @@ class HFRollout(BaseRollout):
                         eos_token_id=eos_token_id,
                         pad_token_id=pad_token_id,
                         min_budget=self.config.min_budget,
-                        max_budget=self.max_budget,
+                        max_budget=self.config.max_budget,
                         replace_tokens=self.replacement_tokens,
                     )
                 else:
