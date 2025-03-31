@@ -105,6 +105,7 @@ class vLLMRollout(BaseRollout):
         kwargs = dict(
             n=1,
             logprobs=1,  # can be set to 0 and let actor to recompute
+            min_tokens=config.min_budget if config.do_budget_forcing else 0,
             max_tokens=config.response_length,
         )
 
@@ -167,8 +168,14 @@ class vLLMRollout(BaseRollout):
                 'top_k': -1,
                 'min_p': 0.0,
                 'temperature': 0,
-                'n': 1  # if greedy, only 1 response
+                'n': 1,  # if greedy, only 1 response
+                'min_tokens': 0
             }
+            do_budget_forcing = False
+            min_budget = None
+        else:
+            do_budget_forcing = self.config.do_budget_forcing
+            min_budget = self.config.min_budget
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
@@ -176,7 +183,9 @@ class vLLMRollout(BaseRollout):
                 prompts=None,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
                 prompt_token_ids=idx_list,
-                use_tqdm=False)
+                use_tqdm=False,
+                do_budget_forcing=do_budget_forcing,
+                min_budget=min_budget)
 
         # TODO(sgm): disable logprob when recompute_log_prob is enable
         # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)

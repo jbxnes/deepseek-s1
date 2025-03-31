@@ -13,16 +13,24 @@
 # limitations under the License.
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/llm.py
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Sequence, cast
+from tqdm import tqdm
+import itertools
 
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from transformers import PretrainedConfig, PreTrainedTokenizer, PreTrainedTokenizerFast
 from verl.workers.rollout.tokenizer import HybridEngineBaseTokenizer
+
 from vllm import LLM
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.utils import Counter
+from vllm.inputs import PromptType
+from vllm.sampling_params import SamplingParams
+from vllm.lora.request import LoRARequest
+from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.model_executor.guided_decoding.guided_fields import GuidedDecodingRequest, LLMGuidedOptions
 
 from .arg_utils import EngineArgs
 from .llm_engine_sp import LLMEngine
@@ -139,6 +147,31 @@ class LLM(LLM):
                 f"Unexpected tokenizer type: {type(tokenizer)}. Must be"
                 "one of the following: PreTrainedTokenizer, PreTrainedTokenizerFast, verl.workers.rollout.HybridEngineBaseTokenizer"
             )
+        
+        # NOTE(jbxnes): Get all possible tokens corresponding to "</think>" for budget forcing.
+
+        self.do_budget_forcing = False
+        self.min_budget = None
+        
+        think_token_id = 26865 # this is the "think" token for Qwen2.5-1.5B-Instruct
+        # think_token_id = torch.Tensor(tokenizer("think").input_ids).long().to(self.device)
+        
+        vocab = tokenizer.get_vocab()
+        left_token_ids = [token_id for token, token_id in vocab.items() if token.endswith("</")]
+        right_token_ids = [token_id for token, token_id in vocab.items() if token.startswith(">")]
+        
+        self.think_tokens = [[left_id, think_token_id, right_id] for left_id, right_id in itertools.product(left_token_ids, right_token_ids)]
+        self.eos_token_id = tokenizer.eos_token_id
+        
+        # Get replacement ("\nWait,") tokens
+        wait_ids = tokenizer("Wait").input_ids
+        assert len(wait_ids) == 1
+        
+        wait_token_id = wait_ids[0] # This should be 14190 for Qwen
+        new_line_id = tokenizer("\n").input_ids[0] # This should be 198 for Qwen
+        comma_id = tokenizer(",").input_ids[0]
+        self.replacement_tokens = [new_line_id, wait_token_id, comma_id]
+        
         self.llm_engine = LLMEngine.from_engine_args(model, tokenizer, engine_args)  # TODO: check usagecontext
         self.request_counter = Counter()
 
@@ -156,9 +189,175 @@ class LLM(LLM):
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> None:
         self.llm_engine.tokenizer = tokenizer
+        
+    def generate(
+        self,
+        prompts: Union[Union[PromptType, Sequence[PromptType]],
+                       Optional[Union[str, List[str]]]] = None,
+        sampling_params: Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]] = None,
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        guided_options_request: Optional[Union[LLMGuidedOptions,
+                                               GuidedDecodingRequest]] = None,
+        priority: Optional[List[int]] = None,
+        do_budget_forcing: bool = False,
+        min_budget: Optional[int] = None
+    ) -> List[RequestOutput]:
+        """Generates the completions for the input prompts.
 
-    def _run_engine(self, *, use_tqdm: bool) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
-        outputs = super()._run_engine(use_tqdm=use_tqdm)
+        This class automatically batches the given prompts, considering
+        the memory constraint. For the best performance, put all of your prompts
+        into a single list and pass it to this method.
+
+        Args:
+            prompts: The prompts to the LLM. You may pass a sequence of prompts
+                for batch inference. See :class:`~vllm.inputs.PromptType`
+                for more details about the format of each prompts.
+            sampling_params: The sampling parameters for text generation. If
+                None, we use the default sampling parameters.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
+            prompt_adapter_request: Prompt Adapter request to use for
+                generation, if any.
+            priority: The priority of the requests, if any.
+                Only applicable when priority scheduling policy is enabled.
+            do_budget_forcing: Whether to use budget forcing.
+            min_budget: The minimum token budget to use in budget forcing.
+
+        Returns:
+            A list of ``RequestOutput`` objects containing the
+            generated completions in the same order as the input prompts.
+
+        Note:
+            Using ``prompts`` and ``prompt_token_ids`` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the ``inputs`` parameter.
+        """
+        self.do_budget_forcing = do_budget_forcing
+        self.min_budget = min_budget
+        
+        if self.llm_engine.model_config.embedding_mode:
+            raise ValueError(
+                "LLM.generate() is only supported for (conditional) generation "
+                "models (XForCausalLM, XForConditionalGeneration).")
+
+        if prompt_token_ids is not None:
+            parsed_prompts = self._convert_v1_inputs(
+                prompts=cast(Optional[Union[str, List[str]]], prompts),
+                prompt_token_ids=prompt_token_ids,
+            )
+        else:
+            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
+                                  prompts)
+
+        if isinstance(guided_options_request, dict):
+            if len(guided_options_request) > 1:
+                raise ValueError(
+                    "You can only use one guided decoding but multiple is "
+                    f"specified: {guided_options_request}")
+            guided_options_request = GuidedDecodingRequest(
+                **guided_options_request)
+
+        if sampling_params is None:
+            # Use default sampling params.
+            sampling_params = SamplingParams()
+
+        self._validate_and_add_requests(
+            prompts=parsed_prompts,
+            params=sampling_params,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+            guided_options=guided_options_request,
+            priority=priority)
+            
+        if self.do_budget_forcing and self.min_budget is None:
+                raise ValueError(
+                    "If do_budget_forcing is True, "
+                    "min_budget must be specified.")
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        return LLMEngine.validate_outputs(outputs, RequestOutput)
+
+    # def _run_engine(self, *, use_tqdm: bool) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    #     outputs = super()._run_engine(use_tqdm=use_tqdm)
+    #     return self._post_process_outputs(outputs)
+
+    # NOTE(jbxnes): Hack to get budget forcing to work in vLLM
+    def _run_engine(
+            self, *, use_tqdm: bool
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+        """
+        This method is a modified version of the original `_run_engine` method.
+        
+        Run the engine with budget forcing to ensure that the number of newly generated tokens for 
+        each sequence is >= min_budget.
+        
+        Specifically:
+        1. If a generated response is less than min_budget tokens, we check if the response ends with
+           token(s) corresponding to “</think>”. In this case, we replace these tokens with "\nWait,"
+           to force the model to continue generation.
+        2. Once each sequence has at least min_budget number of newly generated tokens, do generation
+           once more so the model can finish its response.   
+        """
+        # Initialize tqdm.
+        if use_tqdm:
+            num_requests = self.llm_engine.get_num_unfinished_requests()
+            pbar = tqdm(
+                total=num_requests,
+                desc="Processed prompts",
+                dynamic_ncols=True,
+                postfix=(f"est. speed input: {0:.2f} toks/s, "
+                         f"output: {0:.2f} toks/s"),
+            )
+
+        # Run the engine.
+        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
+        total_in_toks = 0
+        total_out_toks = 0
+        while self.llm_engine.has_unfinished_requests():
+            step_outputs = self.llm_engine.step()
+            for output in step_outputs:
+                
+                # If we have not reached the token budget, we need to force the model to continue 
+                if self.do_budget_forcing and len(output.prompt_token_ids) < self.min_budget:
+                    print('PROMPT TOKEN IDS')
+                    print(len(output.prompt_token_ids))
+                    print(output.prompt_token_ids[-3:])
+                    if output.prompt_token_ids[-3:] in self.think_tokens:
+                        print("REPLACING THINK TOKEN:\n")
+                        print(output.prompt_token_ids)
+                        output.prompt_token_ids[-3:] = self.replacement_tokens
+                        print(output.prompt_token_ids)
+                        print("\n")
+                        
+                if output.finished:
+                    outputs.append(output)
+                    if use_tqdm:
+                        if isinstance(output, RequestOutput):
+                            # Calculate tokens only for RequestOutput
+                            assert output.prompt_token_ids is not None
+                            total_in_toks += len(output.prompt_token_ids)
+                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                            total_out_toks += sum(
+                                len(stp.token_ids) for stp in output.outputs)
+                            out_spd = (total_out_toks /
+                                       pbar.format_dict["elapsed"])
+                            pbar.postfix = (
+                                f"est. speed input: {in_spd:.2f} toks/s, "
+                                f"output: {out_spd:.2f} toks/s")
+                        pbar.update(1)
+
+        if use_tqdm:
+            pbar.close()
+        # Sort the outputs by request ID.
+        # This is necessary because some requests may be finished earlier than
+        # its previous requests.
+        outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return self._post_process_outputs(outputs)
 
     # # NOTE(shengguangming): add for verl
