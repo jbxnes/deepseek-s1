@@ -143,7 +143,7 @@ class HFRollout(BaseRollout):
         wait_ids = self.tokenizer("Wait").input_ids
         assert len(wait_ids) == 1
         wait_token_id = wait_ids[0] # This should be 14190 for Qwen
-        new_line_id = self.tokenizer("/n").input_ids[0] # This should be 198 for Qwen
+        new_line_id = self.tokenizer("\n").input_ids[0] # This should be 198 for Qwen
         comma_id = self.tokenizer(",").input_ids[0]
         self.replacement_tokens = {
             "\n": new_line_id,
