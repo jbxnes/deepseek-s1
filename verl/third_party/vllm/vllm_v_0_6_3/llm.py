@@ -323,16 +323,17 @@ class LLM(LLM):
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 
+                token_ids = list(output.outputs[0].token_ids)
+                # print("TOKEN IDS")
+                # print(token_ids)
+                
                 # If we have not reached the token budget, we need to force the model to continue 
-                if self.do_budget_forcing and len(output.prompt_token_ids) < self.min_budget:
-                    print('PROMPT TOKEN IDS')
-                    print(len(output.prompt_token_ids))
-                    print(output.prompt_token_ids[-3:])
-                    if output.prompt_token_ids[-3:] in self.think_tokens:
+                if self.do_budget_forcing and len(token_ids) < self.min_budget and len(token_ids) >= 3:
+                    if token_ids[-3:] in self.think_tokens:
                         print("REPLACING THINK TOKEN:\n")
-                        print(output.prompt_token_ids)
-                        output.prompt_token_ids[-3:] = self.replacement_tokens
-                        print(output.prompt_token_ids)
+                        print(output.outputs[0].token_ids)
+                        output.outputs[0].token_ids[-3:] = tuple(token_ids[-3:] + self.replacement_tokens)
+                        print(output.outputs[0].token_ids)
                         print("\n")
                         
                 if output.finished:
